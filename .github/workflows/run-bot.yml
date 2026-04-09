@@ -1,0 +1,29 @@
+name: Run trading bot daily
+
+on:
+  schedule:
+    - cron: '0 12 * * *'   # runs once daily at 12:00 UTC; adjust as needed
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install requests
+
+      - name: Run trading bot
+        env:
+          MARKETMASTERS_API_KEY: ${{ secrets.MARKETMASTERS_API_KEY }}
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+        run: python trading_bot.py
