@@ -48,3 +48,23 @@
 2026-04-09 12:14:59,613 [INFO] Market closed — queuing BUY ACI $1000
 2026-04-09 12:14:59,613 [INFO] Market closed — queuing BUY TENB $1000
 2026-04-09 12:14:59,614 [INFO] Run complete. Processed 0 new trade(s). Total tracked: 7
+2026-04-09 14:07:01,325 [INFO] ============================================================
+2026-04-09 14:07:01,325 [INFO] ============================================================
+2026-04-09 14:07:01,326 [INFO] Copy Bot run started: 2026-04-09T14:07:01.326199
+2026-04-09 14:07:01,326 [INFO] Copy Bot run started: 2026-04-09T14:07:01.326199
+2026-04-09 14:07:01,326 [INFO] Copying: Ro Khanna (K000389)
+2026-04-09 14:07:01,326 [INFO] Copying: Ro Khanna (K000389)
+Traceback (most recent call last):
+  File "/Users/johngiles/projects/claudetrade/copybot/bot.py", line 205, in <module>
+    run(dry_run=dry)
+    ~~~^^^^^^^^^^^^^
+  File "/Users/johngiles/projects/claudetrade/copybot/bot.py", line 69, in run
+    market_open = is_market_open()
+  File "/Users/johngiles/projects/claudetrade/copybot/alpaca_trader.py", line 47, in is_market_open
+    data = _get("/clock")
+  File "/Users/johngiles/projects/claudetrade/copybot/alpaca_trader.py", line 22, in _get
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/johngiles/projects/claudetrade/copybot/venv/lib/python3.14/site-packages/requests/models.py", line 1028, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://paper-api.alpaca.markets/v2/clock
