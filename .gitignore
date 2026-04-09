@@ -3,3 +3,4 @@ __pycache__/
 .trading_bot.log
 .env
 *.json
+tsla_strategy.log
