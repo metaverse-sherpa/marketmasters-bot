@@ -36,25 +36,36 @@ ALPACA_HEADERS = {
 
 def get_active_patterns() -> list:
     """
-    Fetch all patterns, filter to status=active with valid price levels.
+    Fetch patterns filtered to status=active & bullish=true, then client-filter
+    to ensure valid price levels.
+
     breakoutPrice = entry, stopLoss = stop, target = take-profit.
     """
     resp = requests.get(
         MARKETMASTERS_URL,
         headers={"X-API-Key": MARKETMASTERS_API_KEY},
+        params={"status": "active", "bullish": "true"},
         timeout=30,
     )
     resp.raise_for_status()
     data = resp.json()
 
+    def is_bullish_flag(val):
+        if isinstance(val, bool):
+            return val
+        if val is None:
+            return False
+        return str(val).lower() == "true"
+
     return [
-        p for p in data["patterns"]
-        if p["status"] == "active"
-        and p["breakoutPrice"] > 0
-        and p["stopLoss"] > 0
-        and p["target"] > 0
-        and p["stopLoss"] < p["breakoutPrice"]  # valid risk structure
-        and p["target"] > p["breakoutPrice"]    # profit target above entry
+        p for p in data.get("patterns", [])
+        if p.get("status") == "active"
+        and is_bullish_flag(p.get("bullish") or p.get("isBullish"))
+        and p.get("breakoutPrice", 0) > 0
+        and p.get("stopLoss", 0) > 0
+        and p.get("target", 0) > 0
+        and p.get("stopLoss") < p.get("breakoutPrice")
+        and p.get("target") > p.get("breakoutPrice")
     ]
 
 # ── Alpaca helpers ────────────────────────────────────────────────────────────
