@@ -138,9 +138,9 @@ def place_bracket_order(
         order["stop_price"] = str(round(entry_price, 2))
         order["limit_price"] = str(round(entry_price * (1 + BREAKOUT_LIMIT_BUFFER), 2))
     else:
-        # Price already broke out — enter via limit at slightly above current price
+        # Price already broke out — enter via limit at the breakout price
         order["type"] = "limit"
-        order["limit_price"] = str(round(entry_price * 1.005, 2))
+        order["limit_price"] = str(round(entry_price, 2))
 
     headers = {**ALPACA_HEADERS, "Content-Type": "application/json"}
     resp = requests.post(f"{ALPACA_BASE_URL}/orders", headers=headers, json=order, timeout=30)
@@ -243,7 +243,8 @@ def run_bot():
         qty = max(1, int(trade_amount / breakout))
 
         price_below_breakout = current_price < breakout
-        entry_price = breakout if price_below_breakout else current_price
+        # Always attempt entry at the breakout price (place a limit there)
+        entry_price = breakout
 
         direction = "PENDING" if price_below_breakout else "BROKE OUT"
         print(
