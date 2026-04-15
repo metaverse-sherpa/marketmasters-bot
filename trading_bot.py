@@ -17,12 +17,12 @@ import hashlib
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-MARKETMASTERS_API_KEY = os.environ["MARKETMASTERS_API_KEY"]
-MARKETMASTERS_URL = "https://api.marketmasters.ai/v1/stocks/patterns"
+MARKETMASTERS_API_KEY = os.environ.get("MARKETMASTERS_API_KEY")
+MARKETMASTERS_URL = os.environ.get("MARKETMASTERS_URL", "https://api.marketmasters.ai/v1/stocks/patterns")
 
-ALPACA_KEY = os.environ["ALPACA_KEY"]
-ALPACA_SECRET = os.environ["ALPACA_SECRET"]
-ALPACA_BASE_URL = "https://paper-api.alpaca.markets/v2"
+ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets/v2")
+ALPACA_KEY = os.environ.get("ALPACA_KEY")
+ALPACA_SECRET = os.environ.get("ALPACA_SECRET")
 
 PORTFOLIO_PCT = 0.02  # 2% of equity per trade
 BREAKOUT_LIMIT_BUFFER = 0.01  # 1% above stop price for stop-limit orders
@@ -31,6 +31,35 @@ ALPACA_HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
     "APCA-API-SECRET-KEY": ALPACA_SECRET,
 }
+
+
+REQUIRED_SECRETS = [
+    "MARKETMASTERS_API_KEY",
+    "ALPACA_KEY",
+    "ALPACA_SECRET",
+    "ALPACA_BASE_URL",
+]
+
+def _check_required_secrets() -> bool:
+    """Check required environment secrets and print helpful instructions if missing.
+
+    Returns True if all secrets present, False otherwise.
+    """
+    missing = [k for k in REQUIRED_SECRETS if not os.environ.get(k)]
+    if not missing:
+        return True
+
+    print("\n[ERROR] Missing required environment secrets:")
+    for k in missing:
+        print(f" - {k}")
+
+    print("\nPlease set them either in a local .env file (place in project root) or as GitHub Actions repository secrets:")
+    print(" - To add to a local .env file, create a file named .env and add lines like:")
+    for k in missing:
+        print(f"     {k}=your_value_here")
+    print("\n - To add secrets in GitHub: Repository → Settings → Secrets and variables → Actions → New repository secret")
+    print("\nThe bot will exit until the missing secrets are provided.\n")
+    return False
 
 # ── MarketMasters API ─────────────────────────────────────────────────────────
 
@@ -191,6 +220,13 @@ def run_bot():
     print(f"\n{'=' * 60}")
     print(f"  Trading Bot  |  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'=' * 60}")
+
+    # Verify required secrets are present before proceeding
+    if not _check_required_secrets():
+        sys.exit(1)
+
+    # Log which Alpaca base URL we're using (helpful for debugging)
+    print(f"  ALPACA_BASE_URL: {ALPACA_BASE_URL}")
 
     # Load previously traded pattern IDs
     traded = load_traded_patterns()
