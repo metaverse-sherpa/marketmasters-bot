@@ -124,6 +124,42 @@ gh run watch <run-id> --repo OWNER/REPO
 
 4. View logs: open Actions → select the workflow run → expand the job and steps to view output. The bot prints helpful messages if secrets are missing.
 
+### Run in GitHub Actions (manual run, dry-run and verification)
+
+If you want to run the bot on-demand from GitHub (recommended for testing), follow these steps.
+
+- From the web UI (manual):
+	- Go to Actions → select **Run trading bot daily** → **Run workflow** → choose branch (e.g., `main`) → Run workflow.
+
+- From the CLI (manual):
+
+```bash
+# Trigger the workflow (requires gh CLI authenticated)
+gh workflow run run-bot.yml --repo OWNER/REPO --ref main
+# Optionally watch the run
+gh run watch --repo OWNER/REPO
+```
+
+- Dry-run (safe verification):
+	- Add a repository secret `DRY_RUN=true` (or set a repository variable) and modify the workflow step to pass `DRY_RUN` into the job environment. When `DRY_RUN` is set, the bot will log intended orders instead of submitting them. This allows end-to-end verification without placing orders.
+
+- Verify environment variables are present before running (quick check step):
+
+```yaml
+- name: Verify required secrets
+	run: |
+		echo "MARKETMASTERS_API_KEY=$MARKETMASTERS_API_KEY"
+		echo "ALPACA_KEY=${ALPACA_KEY:+SET}"
+		echo "ALPACA_SECRET=${ALPACA_SECRET:+SET}"
+		echo "ALPACA_BASE_URL=$ALPACA_BASE_URL"
+```
+
+- Troubleshooting tips:
+	- If the workflow fails at startup complaining about missing secrets, ensure the workflow step maps `secrets.*` into `env:` (see `.github/workflows/run-bot.yml`).
+	- Confirm the workflow YAML is on the repository default branch (`main`/`master`) so Actions registers it.
+	- Inspect the Actions logs for step output and error messages.
+
+
 ## Notes & safety
 - The repository `.gitignore` excludes `*.json` and `.env`, so local exported secrets and runtime state (e.g. `traded_patterns.json`) should not be committed, but be careful not to commit `.env`.
 - The bot places real orders on Alpaca when secrets are valid — use paper trading endpoints and paper account credentials.
