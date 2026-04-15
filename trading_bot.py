@@ -15,17 +15,66 @@ from datetime import datetime
 import json
 import hashlib
 
+# Senior-dev notes:
+# - This script bridges MarketMasters pattern signals to Alpaca paper trading.
+# - Security: API keys should never be committed. Use a local .env (gitignored)
+#   for development and GitHub Actions Secrets for CI runs. See README.md.
+# - Operation model: run daily (or on-demand). The bot will:
+#   1) fetch active bullish patterns from MarketMasters
+#   2) skip symbols that already have positions or open orders in Alpaca
+#   3) place bracket orders (entry, stop loss, take profit) using limit or
+#      stop-limit order types depending on whether the breakout has occurred.
+# - Persistence: `traded_patterns.json` stores pattern ids already acted on to
+#   avoid duplicate entries across runs. The bot will re-check Alpaca — if
+#   no position/order exists for a recorded pattern, it will attempt again.
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 MARKETMASTERS_API_KEY = os.environ.get("MARKETMASTERS_API_KEY")
 MARKETMASTERS_URL = os.environ.get("MARKETMASTERS_URL", "https://api.marketmasters.ai/v1/stocks/patterns")
 
+# Default params used to fetch patterns from MarketMasters. This can be
+# overridden by setting `MARKETMASTERS_PARAMS` in the environment. The
+# variable may be a JSON object (recommended) or a comma-separated list
+# of `key=value` pairs (convenience).
+DEFAULT_MARKETMASTERS_PARAMS = {"status": "active", "bullish": "true"}
+_mm_params_raw = os.environ.get("MARKETMASTERS_PARAMS")
+if _mm_params_raw:
+    try:
+        MARKETMASTERS_PARAMS = json.loads(_mm_params_raw)
+        if not isinstance(MARKETMASTERS_PARAMS, dict):
+            raise ValueError("MARKETMASTERS_PARAMS must decode to a JSON object")
+    except Exception:
+        # Fallback: parse simple comma-separated key=value pairs
+        try:
+            MARKETMASTERS_PARAMS = {}
+            for part in _mm_params_raw.split(","):
+                if not part:
+                    continue
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    MARKETMASTERS_PARAMS[k.strip()] = v.strip()
+        except Exception:
+            print("[WARN] Could not parse MARKETMASTERS_PARAMS; using default")
+            MARKETMASTERS_PARAMS = DEFAULT_MARKETMASTERS_PARAMS
+else:
+    MARKETMASTERS_PARAMS = DEFAULT_MARKETMASTERS_PARAMS
+
 ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets/v2")
 ALPACA_KEY = os.environ.get("ALPACA_KEY")
 ALPACA_SECRET = os.environ.get("ALPACA_SECRET")
 
-PORTFOLIO_PCT = 0.02  # 2% of equity per trade
-BREAKOUT_LIMIT_BUFFER = 0.01  # 1% above stop price for stop-limit orders
+ALPCACA_PERCENTAGE_PER_TRADE = os.environ.get("ALPCACA_PERCENTAGE_PER_TRADE", 0.02) # Percentage of total capital to allocate per trade (e.g., 0.02 for 2%)
+PORTFOLIO_PCT = float(ALPCACA_PERCENTAGE_PER_TRADE)  # Convert to float for calculations
+
+# Buffer applied to the limit leg for stop-limit entries when the market
+# price is below the breakout. Default is 1% (0.01). Make configurable
+# via the BREAKOUT_LIMIT_BUFFER environment variable (fractional).
+try:
+    BREAKOUT_LIMIT_BUFFER = float(os.environ.get("BREAKOUT_LIMIT_BUFFER", "0.01"))
+except Exception:
+    print("[WARN] Invalid BREAKOUT_LIMIT_BUFFER environment variable; using default 0.01")
+    BREAKOUT_LIMIT_BUFFER = 0.01
 
 ALPACA_HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -70,15 +119,21 @@ def get_active_patterns() -> list:
 
     breakoutPrice = entry, stopLoss = stop, target = take-profit.
     """
+    # Prefer server-side filtering when API supports it to reduce payload size.
+    # We still defensively filter client-side because API field names/values
+    # can vary between environments or versions.
     resp = requests.get(
         MARKETMASTERS_URL,
         headers={"X-API-Key": MARKETMASTERS_API_KEY},
-        params={"status": "active", "bullish": "true"},
+        params=MARKETMASTERS_PARAMS,
         timeout=30,
     )
     resp.raise_for_status()
     data = resp.json()
 
+    # Helper: normalize possible representations of a bullish flag.
+    # API responses may use booleans, string "true"/"false", or omit the
+    # field entirely. Treat missing/None as not bullish.
     def is_bullish_flag(val):
         if isinstance(val, bool):
             return val
@@ -100,13 +155,20 @@ def get_active_patterns() -> list:
 # ── Alpaca helpers ────────────────────────────────────────────────────────────
 
 def load_traded_patterns(path="traded_patterns.json") -> set:
+    # Load previously-traded pattern ids.
+    # Stored as a JSON array of strings. Returning a set provides O(1)
+    # membership checks when deciding whether to skip a pattern.
     try:
         with open(path, "r") as f:
             return set(json.load(f))
     except Exception:
+        # Any error (missing file, malformed JSON) results in an empty set.
+        # This is safe: the bot will attempt trades normally if no history.
         return set()
 
 def save_traded_patterns(traded: set, path="traded_patterns.json") -> None:
+    # Persist pattern ids deterministically (sorted list) so diffs are stable
+    # and human-readable during debugging.
     with open(path, "w") as f:
         json.dump(sorted(list(traded)), f, indent=2)
 
@@ -118,10 +180,16 @@ def get_account() -> dict:
 
 def get_existing_symbols() -> set:
     """Return symbols that already have open positions or open orders."""
+    # Query Alpaca for current open positions and open orders. We treat both
+    # as preventing a new entry for the same symbol to avoid accidental
+    # duplicate exposure or conflicting orders.
     pos_resp = requests.get(f"{ALPACA_BASE_URL}/positions", headers=ALPACA_HEADERS, timeout=30)
     pos_resp.raise_for_status()
     positions = {p["symbol"] for p in pos_resp.json()}
 
+    # Limit the number of returned open orders; 500 is large enough for most
+    # accounts but can be adjusted if needed. We only extract the symbol field
+    # since we only need to know whether the symbol is represented.
     ord_resp = requests.get(
         f"{ALPACA_BASE_URL}/orders?status=open&limit=500",
         headers=ALPACA_HEADERS,
@@ -151,6 +219,12 @@ def place_bracket_order(
       take_profit: limit order at target
       stop_loss:   stop order at stopLoss
     """
+    # Build Alpaca bracket order payload. We use string prices because Alpaca
+    # API expects string-serialized decimals for price fields in JSON.
+    # Notes:
+    # - `order_class: bracket` creates the primary entry and attached legs.
+    # - `take_profit.limit_price` and `stop_loss.stop_price` are rounded to
+    #   2 decimal places for currency formatting.
     order: dict = {
         "symbol": symbol,
         "qty": str(qty),
@@ -162,12 +236,18 @@ def place_bracket_order(
     }
 
     if price_below_breakout:
-        # Buy when price breaks out above breakoutPrice
+        # If current market price is below the breakout level, we want to
+        # enter only if price reaches the breakout: use a stop-limit buy
+        # (trigger at stop_price, create a limit at a small buffer above to
+        # increase fill probability). The buffer is configurable.
         order["type"] = "stop_limit"
         order["stop_price"] = str(round(entry_price, 2))
         order["limit_price"] = str(round(entry_price * (1 + BREAKOUT_LIMIT_BUFFER), 2))
     else:
-        # Price already broke out — enter via limit at the breakout price
+        # If price has already reached/broken out, place a limit at the
+        # breakout price to avoid market slippage. Using a limit guarantees
+        # the entry price or better; if you prefer a more aggressive fill
+        # strategy, add a small buffer (e.g. *1.001).
         order["type"] = "limit"
         order["limit_price"] = str(round(entry_price, 2))
 
@@ -185,6 +265,8 @@ def pattern_id(p: dict) -> str:
     Return a stable pattern id string. Tries common explicit id/timestamp keys first,
     then falls back to a SHA1 of the pattern payload, prefixed by the symbol.
     """
+    # The generated id should be stable across runs for the same signal so
+    # we can persist it in `traded_patterns.json` and avoid duplicate actions.
     sym = p.get("symbol", "").upper()
 
     # 1) explicit id-like keys
@@ -211,7 +293,9 @@ def pattern_id(p: dict) -> str:
                 except Exception:
                     pass
 
-    # 3) deterministic fallback: sha1 of the pattern dict
+    # 3) deterministic fallback: sha1 of the pattern dict. We serialize with
+    # `sort_keys=True` so the same logical pattern yields the same hash even
+    # if the API returns fields in different orders.
     s = json.dumps(p, sort_keys=True, separators=(",", ":"))
     h = hashlib.sha1(s.encode("utf-8")).hexdigest()
     return f"{sym}_{h}"
@@ -228,7 +312,10 @@ def run_bot():
     # Log which Alpaca base URL we're using (helpful for debugging)
     print(f"  ALPACA_BASE_URL: {ALPACA_BASE_URL}")
 
-    # Load previously traded pattern IDs
+    # Load previously traded pattern IDs (persistence across runs). We keep
+    # this history to avoid acting twice on the same signal. Note: we
+    # additionally verify Alpaca state at runtime to handle cases where the
+    # local cache and remote state diverge.
     traded = load_traded_patterns()
 
     # Account equity → trade size
@@ -237,7 +324,8 @@ def run_bot():
     trade_amount = equity * PORTFOLIO_PCT
     print(f"  Equity: ${equity:>12,.2f}  |  Trade size (2%): ${trade_amount:,.2f}")
 
-    # Symbols already in portfolio or pending orders
+    # Query Alpaca for current exposure and pending orders. We do this early
+    # so we can skip any symbol that already has an open position/order.
     existing_symbols = get_existing_symbols()
     print(f"  Existing positions/orders: {len(existing_symbols)} symbols")
 
@@ -260,15 +348,21 @@ def run_bot():
         current_price = p["price"]
         pattern_type = p["type"]
 
-        # Already traded this exact pattern signal — only skip if Alpaca still shows position/order
+        # Check whether we've already acted on this exact pattern (by id).
+        # Behavior:
+        # - If the id is recorded AND Alpaca still has exposure for the symbol,
+        #   skip the trade.
+        # - If the id is recorded but Alpaca no longer shows exposure, remove
+        #   the id so we can re-attempt the trade (handles manual cancels or
+        #   other state changes outside this bot).
         if pid in traded:
             if symbol in existing_symbols:
                 skipped_traded += 1
                 continue
-            # previously traded but no active Alpaca position/order -> unmark and attempt again
             traded.remove(pid)
 
-        # Already have exposure to this symbol
+        # If the symbol currently has an open position or order, skip it and
+        # mark the pattern as traded to avoid repeated attempts during this run.
         if symbol in existing_symbols:
             print(f"  SKIP  {symbol:<8}  now has a position/order (refreshed)")
             traded.add(pid)
