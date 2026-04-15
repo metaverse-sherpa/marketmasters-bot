@@ -62,6 +62,37 @@ The bot checks for required environment secrets at startup and will exit with a 
 
 ## Deploying to GitHub Actions (scheduled run)
 
+## Publish this folder to GitHub (create the repository)
+
+If this is a new project folder and you haven't created a remote GitHub repository yet, run one of the following workflows.
+
+Create repo and push using the GitHub CLI (recommended):
+
+```bash
+# login once: gh auth login
+gh repo create OWNER/REPO --public --source=. --remote=origin --push
+# or create private repo:
+# gh repo create OWNER/REPO --private --source=. --remote=origin --push
+```
+
+Manual git workflow (works without `gh`):
+
+```bash
+git init
+git add .
+git commit -m "Initial commit"
+# Choose your default branch name (main or master) and set branch name accordingly:
+git branch -M main
+git remote add origin https://github.com/OWNER/REPO.git
+git push -u origin main
+```
+
+Notes:
+- Replace `OWNER/REPO` with your GitHub username/org and repository name.
+- Ensure the workflow YAML files are on the repository default branch (e.g. `main`) so GitHub Actions registers them.
+- After pushing, go to the repository → Settings → Actions to allow Actions if your org/repo restricts them.
+
+
 1. The repository already contains a workflow at `.github/workflows/run-bot.yml` that runs daily and supports manual runs via `workflow_dispatch`.
 
 2. Add repository secrets in GitHub (UI):
