@@ -64,8 +64,16 @@ ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.ma
 ALPACA_KEY = os.environ.get("ALPACA_KEY")
 ALPACA_SECRET = os.environ.get("ALPACA_SECRET")
 
-ALPCACA_PERCENTAGE_PER_TRADE = os.environ.get("ALPCACA_PERCENTAGE_PER_TRADE", 0.02) # Percentage of total capital to allocate per trade (e.g., 0.02 for 2%)
-PORTFOLIO_PCT = float(ALPCACA_PERCENTAGE_PER_TRADE)  # Convert to float for calculations
+_pct_raw = os.environ.get("ALPCACA_PERCENTAGE_PER_TRADE")
+# Default to 2% if unset or invalid. Accept empty-string from env as unset.
+if _pct_raw is None or _pct_raw == "":
+    PORTFOLIO_PCT = 0.02
+else:
+    try:
+        PORTFOLIO_PCT = float(_pct_raw)
+    except Exception:
+        print("[WARN] Invalid ALPCACA_PERCENTAGE_PER_TRADE; using default 0.02")
+        PORTFOLIO_PCT = 0.02
 
 # Buffer applied to the limit leg for stop-limit entries when the market
 # price is below the breakout. Default is 1% (0.01). Make configurable
@@ -86,7 +94,6 @@ REQUIRED_SECRETS = [
     "MARKETMASTERS_API_KEY",
     "ALPACA_KEY",
     "ALPACA_SECRET",
-    "ALPACA_BASE_URL",
 ]
 
 def _check_required_secrets() -> bool:

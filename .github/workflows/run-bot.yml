@@ -25,10 +25,11 @@ jobs:
           MARKETMASTERS_API_KEY: ${{ secrets.MARKETMASTERS_API_KEY }}
           ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }}
-          # Optional / non-secret configuration (map if you set them as secrets or variables)
-          MARKETMASTERS_URL: ${{ secrets.MARKETMASTERS_URL }}
-          MARKETMASTERS_PARAMS: ${{ secrets.MARKETMASTERS_PARAMS }}
-          ALPCACA_PERCENTAGE_PER_TRADE: ${{ secrets.ALPCACA_PERCENTAGE_PER_TRADE }}
-          BREAKOUT_LIMIT_BUFFER: ${{ secrets.BREAKOUT_LIMIT_BUFFER }}
+          # Provide sensible defaults for optional values so the workflow
+          # doesn't require every non-secret env to be set in Secrets.
+          ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL || 'https://paper-api.alpaca.markets/v2' }}
+          MARKETMASTERS_URL: ${{ secrets.MARKETMASTERS_URL || 'https://api.marketmasters.ai/v1/stocks/patterns' }}
+          MARKETMASTERS_PARAMS: ${{ secrets.MARKETMASTERS_PARAMS || '{"status":"active","bullish":"true"}' }}
+          ALPCACA_PERCENTAGE_PER_TRADE: ${{ secrets.ALPCACA_PERCENTAGE_PER_TRADE || '0.02' }}
+          BREAKOUT_LIMIT_BUFFER: ${{ secrets.BREAKOUT_LIMIT_BUFFER || '0.01' }}
         run: python trading_bot.py
