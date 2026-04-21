@@ -46,7 +46,12 @@ def main():
             text += f"• {link} — entry: {entry} | SL: {sl} | TP: {tp}\n"
     if insuff:
         bad = s.get('insufficient_symbols', [])
-        text += 'WARNING: insufficient buying power for: ' + ', '.join(bad) + '\n'
+        if bad:
+            links = []
+            for sym in bad:
+                url = f"https://marketmasters.ai/stocks/{quote_plus(str(sym))}"
+                links.append(f'<a href="{url}">{html.escape(str(sym))}</a>')
+            text += 'WARNING: insufficient buying power for: ' + ', '.join(links) + '\n'
 
     token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
     chat = os.environ.get('TELEGRAM_CHAT_ID', '')
