@@ -2,7 +2,9 @@
 import os
 import sys
 import json
+import html
 import requests
+from urllib.parse import quote_plus
 
 def main():
     fn = 'run_summary.json'
@@ -27,11 +29,21 @@ def main():
     if new_orders:
         text += f"New orders: {len(new_orders)}\n"
         for o in new_orders:
-            text += (
-                f"{o.get('symbol')} — entry={o.get('entry_price')} "
-                f"sl={o.get('stop_loss')} tp={o.get('take_profit')} "
-                f"qty={o.get('qty')} order_id={o.get('order_id')}\n"
-            )
+            # Format numeric values to two decimal places when possible
+            def fval(k):
+                v = o.get(k)
+                try:
+                    return f"{float(v):.2f}"
+                except Exception:
+                    return str(v)
+
+            entry = fval('entry_price')
+            sl = fval('stop_loss')
+            tp = fval('take_profit')
+            sym = str(o.get('symbol'))
+            url = f"https://marketmasters.ai/stocks/{quote_plus(sym)}"
+            link = f"<a href=\"{html.escape(url)}\">{html.escape(sym)}</a>"
+            text += f"• {link} — entry: {entry} | SL: {sl} | TP: {tp}<br>"
     if insuff:
         bad = s.get('insufficient_symbols', [])
         text += 'WARNING: insufficient buying power for: ' + ', '.join(bad) + '\n'
@@ -45,7 +57,7 @@ def main():
     try:
         resp = requests.post(
             f'https://api.telegram.org/bot{token}/sendMessage',
-            data={'chat_id': chat, 'text': text},
+            data={'chat_id': chat, 'text': text, 'parse_mode': 'HTML'},
             timeout=15,
         )
         print('Telegram response', resp.status_code, resp.text)
