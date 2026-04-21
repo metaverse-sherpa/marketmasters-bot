@@ -43,14 +43,28 @@ jobs:
           # Capture output so we can inspect failures for "insufficient buying power"
           python trading_bot.py 2>&1 | tee run.log
           rc=${PIPESTATUS[0]}
-          insufficient=false
-          if [ $rc -ne 0 ]; then
-            if grep -qi "insufficient buying power" run.log; then
-              echo "Only insufficient buying power errors detected; treating workflow as success."
-              insufficient=true
-              rc=0
-            fi
+
+          # Detect insufficient buying power anywhere in the log
+          if grep -qi "insufficient buying power" run.log; then
+            insufficient=true
+          else
+            insufficient=false
           fi
+
+          # Detect any explicit ERROR lines (other failures)
+          if grep -qi "^\s*ERROR:" run.log; then
+            has_other_errors=true
+          else
+            has_other_errors=false
+          fi
+
+          # If the script failed (rc != 0) but the only issues were insufficient buying
+          # power warnings (no other ERROR: lines), treat as success.
+          if [ $rc -ne 0 ] && [ "$insufficient" = "true" ] && [ "$has_other_errors" = "false" ]; then
+            echo "Only insufficient buying power errors detected; treating workflow as success."
+            rc=0
+          fi
+
           echo "insufficient=${insufficient}" >> $GITHUB_OUTPUT
           exit $rc
         shell: bash
