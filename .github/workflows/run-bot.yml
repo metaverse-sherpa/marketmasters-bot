@@ -107,3 +107,54 @@ jobs:
             exit 1
           fi
         shell: bash
+
+      - name: Send Telegram notification
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || '' }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || '' }}
+        run: |
+          set -euo pipefail
+          # Only send if run_summary.json exists and contains data worth sending
+          if [ ! -f run_summary.json ]; then
+            echo "No run_summary.json found; nothing to notify"
+            exit 0
+          fi
+
+          python - <<'PY'
+import json,os,sys,requests
+fn='run_summary.json'
+try:
+    s=json.load(open(fn))
+except Exception as e:
+    print('Could not read run_summary.json:',e)
+    sys.exit(0)
+
+new_orders=s.get('new_orders',[])
+insuff=s.get('insufficient_buying_power',False)
+if not new_orders and not insuff:
+    print('No new orders and no insufficient buying power; nothing to notify')
+    sys.exit(0)
+
+run_num=os.environ.get('GITHUB_RUN_NUMBER','?')
+text=f"MarketMasters Bot Run #{run_num}\n"
+if new_orders:
+    text += f"New orders: {len(new_orders)}\n"
+    for o in new_orders:
+        text += f"{o.get('symbol')} — entry={o.get('entry_price')} sl={o.get('stop_loss')} tp={o.get('take_profit')} qty={o.get('qty')} order_id={o.get('order_id')}\n"
+if insuff:
+    bad=s.get('insufficient_symbols',[])
+    text += "WARNING: insufficient buying power for: " + ", ".join(bad) + "\n"
+
+token=os.environ.get('TELEGRAM_BOT_TOKEN','')
+chat=os.environ.get('TELEGRAM_CHAT_ID','')
+if not token or not chat:
+    print('Missing Telegram secrets; not sending')
+    sys.exit(0)
+
+resp=requests.post(f'https://api.telegram.org/bot{token}/sendMessage', data={'chat_id':chat,'text':text})
+print('Telegram response',resp.status_code, resp.text)
+if resp.status_code!=200:
+    sys.exit(1)
+PY
+        shell: bash

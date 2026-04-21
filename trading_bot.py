@@ -377,6 +377,8 @@ def run_bot():
     skipped_traded = 0
     skipped_symbol = 0
     errors = 0
+    new_orders_details = []
+    insufficient_symbols = []
 
     for p in patterns:
         pid = pattern_id(p)
@@ -430,6 +432,19 @@ def run_bot():
             traded.add(pid)
             existing_symbols.add(symbol)
             new_trades += 1
+            # Record structured info for notifications
+            try:
+                new_orders_details.append({
+                    "symbol": symbol,
+                    "entry_price": float(entry_price),
+                    "stop_loss": float(stop_loss),
+                    "take_profit": float(target),
+                    "qty": int(qty),
+                    "order_id": order.get("id"),
+                })
+            except Exception:
+                # best-effort: don't let notification failures break the run
+                pass
         else:
             # If Alpaca indicates insufficient buying power, treat it as a
             # non-fatal condition: log a warning and continue without
@@ -437,6 +452,7 @@ def run_bot():
             # solely because the account lacks buying power for some trades.
             if err and "insufficient buying power" in str(err).lower():
                 print(f"           {'':8}  WARNING: {err} — skipping trade (insufficient buying power)")
+                insufficient_symbols.append(symbol)
                 continue
 
             print(f"           {'':8}  ERROR: {err}")
@@ -448,6 +464,53 @@ def run_bot():
     print(f"  New trades: {new_trades}  |  Skipped (already traded): {skipped_traded}"
           f"  |  Skipped (symbol exists): {skipped_symbol}  |  Errors: {errors}")
     print(f"{'=' * 60}\n")
+
+    # Emit a small JSON summary for external notification steps (CI/Actions)
+    try:
+        summary = {
+            "new_orders": new_orders_details,
+            "insufficient_buying_power": len(insufficient_symbols) > 0,
+            "insufficient_symbols": sorted(list(set(insufficient_symbols))),
+            "new_trades_count": new_trades,
+            "skipped_symbol_count": skipped_symbol,
+        }
+        with open("run_summary.json", "w") as f:
+            json.dump(summary, f)
+        # If Telegram secrets are available in the environment, send a
+        # best-effort notification immediately so local runs also notify.
+        try:
+            token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+            chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+            if token and chat:
+                run_id = os.environ.get("GITHUB_RUN_NUMBER", "local")
+                text = f"MarketMasters Bot Run #{run_id}\n"
+                if summary.get("new_orders"):
+                    text += f"New orders: {len(summary.get('new_orders'))}\n"
+                    for o in summary.get("new_orders", []):
+                        text += (
+                            f"{o.get('symbol')} — entry={o.get('entry_price')} "
+                            f"sl={o.get('stop_loss')} tp={o.get('take_profit')} "
+                            f"qty={o.get('qty')} order_id={o.get('order_id')}\n"
+                        )
+                if summary.get("insufficient_buying_power"):
+                    bad = summary.get("insufficient_symbols", [])
+                    text += "WARNING: insufficient buying power for: " + ", ".join(bad) + "\n"
+
+                try:
+                    resp = requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        data={"chat_id": chat, "text": text},
+                        timeout=10,
+                    )
+                    print(f"Telegram response: {resp.status_code} {resp.text}")
+                except Exception as e:
+                    print(f"[WARN] Telegram send failed: {e}")
+        except Exception:
+            # non-fatal
+            pass
+    except Exception:
+        # non-fatal
+        pass
 
     return new_trades, errors
 

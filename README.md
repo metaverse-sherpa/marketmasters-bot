@@ -203,3 +203,104 @@ set -a; source .env; set +a
 ```
 
 That's all — the bot will print helpful messages if required variables are missing.
+
+Telegram notifications (optional)
+
+- To receive Telegram alerts from the GitHub Actions workflow, add these repository secrets:
+	- `TELEGRAM_BOT_TOKEN` — Bot token from BotFather (format: 123456:ABC-...)
+	- `TELEGRAM_CHAT_ID` — the chat id to send messages to (your user id or channel id)
+
+- The workflow will send a short summary when new orders are placed and/or when insufficient buying power is detected.
+
+To get `TELEGRAM_BOT_TOKEN`: message [@BotFather](https://t.me/BotFather) on Telegram and follow instructions to create a bot. To get `TELEGRAM_CHAT_ID` send a message to the bot and use `https://api.telegram.org/bot<token>/getUpdates` to inspect the chat id, or use `@userinfobot` to find your own id.
+
+Developer setup: Telegram secrets and local testing
+
+1) Create a Telegram bot and obtain a token
+
+- Open Telegram and message @BotFather. Create a new bot and copy the token it returns. The token looks like `123456:ABC-...`.
+
+2) Obtain your chat id
+
+- Send a message to your new bot (just "hi"). Then visit in your browser:
+
+	`https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
+
+	Look for the `chat` -> `id` field in the JSON response. That value is `TELEGRAM_CHAT_ID`.
+
+- Alternatively, message `@userinfobot` or `@RawDataBot` to get your own user id.
+
+3) Local dev: create a `.env` from the template
+
+Copy `.env.template` to `.env` and fill in your real values (do NOT commit `.env`):
+
+```bash
+cp .env.template .env
+# edit .env and paste real tokens
+```
+
+4) Add secrets to GitHub (for Actions)
+
+- In your repository on GitHub: Settings → Secrets and variables → Actions → New repository secret.
+- Add two secrets: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. The workflow will read these and send notifications.
+
+Automating secret creation (optional)
+
+If you'd rather populate GitHub repository secrets from your local `.env` automatically, the repository includes a helper script:
+
+```
+./scripts/ensure_github_secrets.sh [OWNER/REPO]
+```
+
+Behavior:
+- Reads values from `.env` in the project root (create from `.env.template`).
+- If `OWNER/REPO` isn't provided, the script attempts to infer the repo from `git remote origin`.
+- It will create any missing secrets (does not overwrite existing secrets).
+
+Prerequisites:
+- `gh` CLI must be installed and authenticated (`gh auth login`).
+- Your `.env` must contain the keys you want to publish as secrets.
+
+Example (use current git remote):
+
+```bash
+cp .env.template .env
+# edit .env with real values
+./scripts/ensure_github_secrets.sh
+```
+
+Or specify repo explicitly:
+
+```bash
+./scripts/ensure_github_secrets.sh my-org/my-repo
+```
+
+Security note: the script reads your local `.env` and uploads secrets to GitHub. Only run it on a machine you trust and ensure your `.env` is not shared or committed.
+
+5) Quick local test of notification (optional)
+
+- After running `trading_bot.py` locally (it writes `run_summary.json`), you can test the notification snippet locally by running the small Python block below (requires `requests` installed and `.env` loaded):
+
+```bash
+python - <<'PY'
+import json,os,requests
+fn='run_summary.json'
+if not os.path.exists(fn):
+	print('create a run_summary.json first by running trading_bot.py')
+	exit(0)
+s=json.load(open(fn))
+text='Test notification\n'
+if s.get('new_orders'):
+	text += f"New orders: {len(s.get('new_orders'))}\n"
+if s.get('insufficient_buying_power'):
+	text += 'Insufficient buying power detected\n'
+token=os.environ.get('TELEGRAM_BOT_TOKEN')
+chat=os.environ.get('TELEGRAM_CHAT_ID')
+resp=requests.post(f'https://api.telegram.org/bot{token}/sendMessage', data={'chat_id':chat,'text':text})
+print(resp.status_code, resp.text)
+PY
+```
+
+Notes
+- Keep your `.env` out of version control. Use the committed `.env.template` as the safe reference for developers.
+- The GitHub Actions workflow will only send Telegram messages if `run_summary.json` contains new orders or insufficient-buying-power flags.
