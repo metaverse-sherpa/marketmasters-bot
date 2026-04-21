@@ -55,18 +55,41 @@ jobs:
           exit $rc
         shell: bash
 
-      - name: Create issue for insufficient buying power
+      - name: Create issue for insufficient buying power (GitHub API)
         if: steps.run-bot.outputs.insufficient == 'true'
-        uses: peter-evans/create-issue@v4
-        with:
-          title: "[MarketMasters Bot] Insufficient buying power — no trades placed"
-          body: |
-            The trading bot run on `${{ github.run_number }}` detected insufficient buying power and skipped placing new trades.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FALLBACK_ASSIGNEE: ${{ secrets.ALERT_GITHUB_USERNAME || '' }}
+        run: |
+          set -euo pipefail
+          owner_repo="${GITHUB_REPOSITORY}"
+          owner="${owner_repo%%/*}"
+          repo="${owner_repo#*/}"
 
-            Please increase buying power or review account settings to allow the bot to place trades.
-          # Assign to the user who manually triggered the workflow (if any),
-          # otherwise assign to the repository owner. Note: if the repository
-          # owner is an organization, assignment may fail unless the owner
-          # username is a valid assignee; in that case set the
-          # `ALERT_GITHUB_USERNAME` secret to a valid user instead.
-          assignees: ${{ github.event_name == 'workflow_dispatch' && github.actor || github.repository_owner }}
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            assignee="${GITHUB_ACTOR}"
+          else
+            if [ -n "${FALLBACK_ASSIGNEE}" ]; then
+              assignee="${FALLBACK_ASSIGNEE}"
+            else
+              assignee="${GITHUB_REPOSITORY_OWNER}"
+            fi
+          fi
+
+          title='[MarketMasters Bot] Insufficient buying power — no trades placed'
+          body="The trading bot run on ${GITHUB_RUN_NUMBER} detected insufficient buying power and skipped placing new trades.\n\nPlease increase buying power or review account settings to allow the bot to place trades."
+
+          payload=$(printf '{"title":"%s","body":"%s","assignees":["%s"]}' "$title" "$body" "$assignee")
+
+          echo "Creating issue in ${owner}/${repo} assigned to ${assignee}"
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${owner}/${repo}/issues" \
+            -d "$payload")
+
+          if [ "$http_code" -ne 201 ]; then
+            echo "Failed to create issue (HTTP $http_code)"
+            exit 1
+          fi
+        shell: bash
