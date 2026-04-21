@@ -42,8 +42,8 @@ def main():
             tp = fval('take_profit')
             sym = str(o.get('symbol'))
             url = f"https://marketmasters.ai/stocks/{quote_plus(sym)}"
-            link = f"<a href=\"{html.escape(url)}\">{html.escape(sym)}</a>"
-            text += f"• {link} — entry: {entry} | SL: {sl} | TP: {tp}<br>"
+            link = f"<a href=\"{url}\">{html.escape(sym)}</a>"
+            text += f"• {link} — entry: {entry} | SL: {sl} | TP: {tp}\n"
     if insuff:
         bad = s.get('insufficient_symbols', [])
         text += 'WARNING: insufficient buying power for: ' + ', '.join(bad) + '\n'
