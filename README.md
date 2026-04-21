@@ -11,7 +11,7 @@ This repository runs a trading bot that reads bullish chart patterns from Market
 ## Prerequisites
 - Python 3.11 (or compatible)
 - `pip` and (optionally) a virtual environment tool
-- `gh` CLI (optional, for adding secrets from terminal)
+- `gh` CLI (optional, for adding Github secrets from terminal)
 
 ## Local setup (development)
 
@@ -47,6 +47,9 @@ ALPACA_BASE_URL=https://paper-api.alpaca.markets/v2
 
 ```bash
 python -m venv .venv
+or
+python3 -m venv .venv
+
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
@@ -56,6 +59,7 @@ pip install -r requirements.txt
 
 ```bash
 python trading_bot.py
+
 ```
 
 The bot checks for required environment secrets at startup and will exit with a helpful message if any are missing.
@@ -169,6 +173,33 @@ gh run watch --repo OWNER/REPO
 - If a workflow does not appear in Actions, ensure the workflow YAML is on the repository default branch (usually `master` or `main`) and that Actions are allowed in repository/org settings.
 - If the bot exits at startup, check the printed list of missing environment variables and add them to `.env` (for local) or GitHub Secrets (for Actions).
 
----
+## Local setup (development)
 
-If you want, I can commit and push this README for you and trigger a workflow run for testing.
+Keep local testing simple:
+
+1. Create a `.env` from the template and edit it with your keys:
+
+```bash
+cp .env.template .env
+# edit .env with your API keys and settings
+```
+
+2. Create and activate a virtual environment, install deps, then run the bot:
+
+```bash
+python -m venv .venv    # on macOS use: python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+python trading_bot.py   # or python3 trading_bot.py on some macOS setups
+```
+
+Notes:
+- The script will auto-load `.env` when `python-dotenv` is installed (included in `requirements.txt`).
+- If you prefer not to install `python-dotenv`, export the file into your shell before running:
+
+```bash
+set -a; source .env; set +a
+```
+
+That's all — the bot will print helpful messages if required variables are missing.

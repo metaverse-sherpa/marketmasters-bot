@@ -5,3 +5,4 @@ trading_bot.log
 *.json
 *.log
 traded_patterns.json
+.venv/

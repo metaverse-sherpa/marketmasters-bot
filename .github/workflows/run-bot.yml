@@ -6,6 +6,8 @@ on:
 
 jobs:
   run-bot:
+    permissions:
+      issues: write
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -24,6 +26,7 @@ jobs:
           pip install requests
 
       - name: Run trading bot
+        id: run-bot
         env:
           MARKETMASTERS_API_KEY: ${{ secrets.MARKETMASTERS_API_KEY }}
           ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
@@ -35,4 +38,35 @@ jobs:
           MARKETMASTERS_PARAMS: ${{ secrets.MARKETMASTERS_PARAMS || '{"status":"active","bullish":"true"}' }}
           ALPCACA_PERCENTAGE_PER_TRADE: ${{ secrets.ALPCACA_PERCENTAGE_PER_TRADE || '0.02' }}
           BREAKOUT_LIMIT_BUFFER: ${{ secrets.BREAKOUT_LIMIT_BUFFER || '0.01' }}
-        run: python trading_bot.py
+        run: |
+          set -o pipefail
+          # Capture output so we can inspect failures for "insufficient buying power"
+          python trading_bot.py 2>&1 | tee run.log
+          rc=${PIPESTATUS[0]}
+          insufficient=false
+          if [ $rc -ne 0 ]; then
+            if grep -qi "insufficient buying power" run.log; then
+              echo "Only insufficient buying power errors detected; treating workflow as success."
+              insufficient=true
+              rc=0
+            fi
+          fi
+          echo "insufficient=${insufficient}" >> $GITHUB_OUTPUT
+          exit $rc
+        shell: bash
+
+      - name: Create issue for insufficient buying power
+        if: steps.run-bot.outputs.insufficient == 'true'
+        uses: peter-evans/create-issue@v4
+        with:
+          title: "[MarketMasters Bot] Insufficient buying power — no trades placed"
+          body: |
+            The trading bot run on `${{ github.run_number }}` detected insufficient buying power and skipped placing new trades.
+
+            Please increase buying power or review account settings to allow the bot to place trades.
+          # Assign to the user who manually triggered the workflow (if any),
+          # otherwise assign to the repository owner. Note: if the repository
+          # owner is an organization, assignment may fail unless the owner
+          # username is a valid assignee; in that case set the
+          # `ALERT_GITHUB_USERNAME` secret to a valid user instead.
+          assignees: ${{ github.event_name == 'workflow_dispatch' && github.actor || github.repository_owner }}

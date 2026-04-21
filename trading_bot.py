@@ -15,6 +15,19 @@ from datetime import datetime
 import json
 import hashlib
 
+# Optional: load a local .env file during development so running the script
+# inside a virtualenv picks up secrets from .env without exporting them
+# into the shell. This is non-invasive: if `python-dotenv` is not installed
+# the import will fail silently and the script continues (CI uses GitHub
+# Secrets instead).
+try:
+    from dotenv import load_dotenv
+    _loaded = load_dotenv()
+    if _loaded:
+        print("[INFO] Loaded environment variables from .env")
+except Exception:
+    pass
+
 # Senior-dev notes:
 # - This script bridges MarketMasters pattern signals to Alpaca paper trading.
 # - Security: API keys should never be committed. Use a local .env (gitignored)
@@ -263,6 +276,25 @@ def place_bracket_order(
 
     if resp.status_code in (200, 201):
         return resp.json(), None
+
+    # Attempt to detect Alpaca's insufficient buying power response and
+    # treat it specially so callers can choose to ignore it. Alpaca returns
+    # a 403 with a JSON body containing a `message` like
+    # {"message":"insufficient buying power","code":40310000,...}
+    try:
+        body = resp.json()
+    except Exception:
+        body = {}
+
+    msg = ""
+    code = None
+    if isinstance(body, dict):
+        msg = str(body.get("message") or "")
+        code = body.get("code")
+
+    if resp.status_code == 403 and ("insufficient buying power" in msg.lower() or code == 40310000):
+        return None, "insufficient buying power"
+
     return None, f"HTTP {resp.status_code}: {resp.text}"
 
 # ── Main bot logic ────────────────────────────────────────────────────────────
@@ -399,6 +431,14 @@ def run_bot():
             existing_symbols.add(symbol)
             new_trades += 1
         else:
+            # If Alpaca indicates insufficient buying power, treat it as a
+            # non-fatal condition: log a warning and continue without
+            # incrementing the error counter so the workflow doesn't fail
+            # solely because the account lacks buying power for some trades.
+            if err and "insufficient buying power" in str(err).lower():
+                print(f"           {'':8}  WARNING: {err} — skipping trade (insufficient buying power)")
+                continue
+
             print(f"           {'':8}  ERROR: {err}")
             errors += 1
 
