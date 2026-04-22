@@ -1,0 +1,56 @@
+name: Check Positions
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  check-positions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run check_closes
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CHECK_MINUTES: '6'
+        run: |
+          python scripts/check_closes.py
+
+      - name: Ensure seen_closes.json exists (for debugging)
+        run: |
+          # Create an empty seen_closes.json if the script hasn't created one yet
+          if [ ! -f seen_closes.json ]; then echo "[]" > seen_closes.json; fi
+
+      - name: Upload seen_closes.json artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: seen_closes
+          path: seen_closes.json
+
+      - name: Ensure placed_brackets.json exists (for debugging)
+        run: |
+          # Create an empty placed_brackets.json if the bot hasn't created one yet
+          if [ ! -f placed_brackets.json ]; then echo "{}" > placed_brackets.json; fi
+
+      - name: Upload placed_brackets.json artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: placed_brackets
+          path: placed_brackets.json

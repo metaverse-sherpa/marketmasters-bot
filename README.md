@@ -304,3 +304,45 @@ PY
 Notes
 - Keep your `.env` out of version control. Use the committed `.env.template` as the safe reference for developers.
 - The GitHub Actions workflow will only send Telegram messages if `run_summary.json` contains new orders or insufficient-buying-power flags.
+
+## Detecting Closed Positions (TP / SL inference)
+
+This repository includes a lightweight poller and a scheduled GitHub Action
+that attempt to detect when positions close and whether the close was due
+to a take-profit (TP) or stop-loss (SL).
+
+- `trading_bot.py` persists a best-effort mapping to `placed_brackets.json`
+	when it places bracket orders. Each entry includes `symbol`, `entry`,
+	`stop`, `target`, `qty`, `placed_at`, and any identifiers returned by
+	the broker (primary order id or leg ids).
+- `scripts/check_closes.py` is a scheduled poller that runs every 5 minutes
+	(see `.github/workflows/check-positions.yml`). It queries Alpaca for
+	recently-closed orders and compares fill prices against recorded
+	bracket targets to infer whether a close was TP or SL.
+
+Operational notes:
+
+- Persistence is intentionally best-effort and local (JSON file). For
+	higher reliability in production, persist the mapping to an external
+	store (S3, RDS, etc.).
+- The poller is idempotent but does not deduplicate notifications across
+	runs by default. If you require deduplication, add a `seen_closes.json`
+	to track notified order ids or extend the script to write to a small
+	datastore.
+- Configure the poller via GitHub Secrets: `ALPACA_KEY`, `ALPACA_SECRET`,
+	optional `ALPACA_BASE_URL`, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
+
+Quick local test:
+
+```bash
+# export env vars (or use .env + dotenv)
+export ALPACA_KEY=...
+export ALPACA_SECRET=...
+export TELEGRAM_BOT_TOKEN=...
+export TELEGRAM_CHAT_ID=...
+python scripts/check_closes.py
+```
+
+If you prefer real-time detection, consider running a websocket listener
+for Alpaca `trade_updates` — that approach provides immediate notifications
+and avoids polling delays.

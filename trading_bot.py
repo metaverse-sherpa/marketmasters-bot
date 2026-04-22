@@ -186,6 +186,47 @@ def load_traded_patterns(path="traded_patterns.json") -> set:
         # This is safe: the bot will attempt trades normally if no history.
         return set()
 
+
+def load_placed_brackets(path="placed_brackets.json") -> dict:
+    """
+    Load persisted bracket metadata previously saved by this bot.
+
+    The file format is a JSON object keyed by a primary order id (or a
+    synthetic key when the broker doesn't return one). Each value should
+    contain at least: symbol, entry, stop, target, qty, placed_at, and
+    optional leg_ids. This mapping lets downstream consumers (pollers or
+    websocket handlers) unambiguously match a fill to the original bracket
+    parameters for TP/SL inference.
+
+    We deliberately keep this a best-effort loader: corruption or missing
+    files return an empty dict so the bot continues running rather than
+    failing. The write path is also best-effort.
+    """
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        # If the file doesn't exist or is malformed, return an empty mapping.
+        return {}
+
+
+def save_placed_brackets(brackets: dict, path="placed_brackets.json") -> None:
+    """
+    Persist the `brackets` mapping to disk.
+
+    This is intentionally best-effort: failures to persist should not
+    interrupt trading. The file is written atomically by overwriting the
+    target path; for higher durability consider writing to a temp file
+    and renaming, or uploading to an external store.
+    """
+    try:
+        with open(path, "w") as f:
+            json.dump(brackets, f, indent=2, sort_keys=True)
+    except Exception:
+        # Persistence failures are non-fatal; log to stdout and continue.
+        print(f"Warning: failed to save placed brackets to {path}")
+        return
+
 def save_traded_patterns(traded: set, path="traded_patterns.json") -> None:
     # Persist pattern ids deterministically (sorted list) so diffs are stable
     # and human-readable during debugging.
@@ -445,6 +486,54 @@ def run_bot():
             except Exception:
                 # best-effort: don't let notification failures break the run
                 pass
+            # Persist bracket metadata for later close-detection (TP/SL inference).
+            #
+            # Rationale: when an order is later observed as closed/filled we
+            # want an authoritative source of the originally-intended entry,
+            # stop and target levels. Relying on heuristics alone risks
+            # misclassification (especially for instruments with wide ticks
+            # or for partial fills). We persist a minimal mapping keyed by
+            # the broker's primary order id (or a synthetic key when one
+            # isn't provided).
+            try:
+                brackets = load_placed_brackets()
+
+                # Prefer broker-assigned id; fall back to client id or a
+                # synthetic timestamped key so every placement is recorded.
+                primary_id = order.get("id") or order.get("client_order_id")
+                if not primary_id:
+                    primary_id = f"{symbol}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+
+                # Normalize numeric/None values into the mapping; keep raw
+                # strings for traceability to the original request/response.
+                entry = entry_price
+                stop = stop_loss
+                tgt = target
+
+                # Attempt to capture any child/leg identifiers returned by
+                # the broker. These can help link fills back to the
+                # specific leg that executed.
+                leg_ids = None
+                for key in ("legs", "child_order_ids", "child_orders", "legs_orders"):
+                    if key in order and order.get(key):
+                        leg_ids = order.get(key)
+                        break
+
+                brackets[str(primary_id)] = {
+                    "symbol": symbol,
+                    "entry": entry,
+                    "stop": stop,
+                    "target": tgt,
+                    "qty": int(qty),
+                    "placed_at": datetime.now(timezone.utc).isoformat(),
+                    "primary_order_id": primary_id,
+                    "leg_ids": leg_ids,
+                }
+
+                # Best-effort persist; failures are logged but non-fatal.
+                save_placed_brackets(brackets)
+            except Exception as e:
+                print("Warning: failed to persist placed bracket metadata:", e)
         else:
             # If Alpaca indicates insufficient buying power, treat it as a
             # non-fatal condition: log a warning and continue without
