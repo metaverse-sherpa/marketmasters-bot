@@ -336,6 +336,12 @@ def place_bracket_order(
     if resp.status_code == 403 and ("insufficient buying power" in msg.lower() or code == 40310000):
         return None, "insufficient buying power"
 
+    # Detect Alpaca's "asset not found" response (HTTP 422, code 42210000).
+    # This happens when a symbol is not tradable on Alpaca (e.g., foreign
+    # stocks with suffixes like .DE). Treat as a warning, not a fatal error.
+    if resp.status_code == 422 and ("not found" in msg.lower() or code == 42210000):
+        return None, "asset not found"
+
     return None, f"HTTP {resp.status_code}: {resp.text}"
 
 # ── Main bot logic ────────────────────────────────────────────────────────────
@@ -420,6 +426,7 @@ def run_bot():
     errors = 0
     new_orders_details = []
     insufficient_symbols = []
+    asset_not_found_symbols = []
 
     for p in patterns:
         pid = pattern_id(p)
@@ -544,6 +551,14 @@ def run_bot():
                 insufficient_symbols.append(symbol)
                 continue
 
+            # If Alpaca indicates the asset is not found (e.g., foreign
+            # stocks not tradable on Alpaca), treat as a warning and skip
+            # without counting as an error so the workflow doesn't fail.
+            if err and "asset not found" in str(err).lower():
+                print(f"           {'':8}  WARNING: {err} — skipping trade (asset not found)")
+                asset_not_found_symbols.append(symbol)
+                continue
+
             print(f"           {'':8}  ERROR: {err}")
             errors += 1
 
@@ -560,6 +575,8 @@ def run_bot():
             "new_orders": new_orders_details,
             "insufficient_buying_power": len(insufficient_symbols) > 0,
             "insufficient_symbols": sorted(list(set(insufficient_symbols))),
+            "asset_not_found": len(asset_not_found_symbols) > 0,
+            "asset_not_found_symbols": sorted(list(set(asset_not_found_symbols))),
             "new_trades_count": new_trades,
             "skipped_symbol_count": skipped_symbol,
         }
@@ -584,6 +601,9 @@ def run_bot():
                 if summary.get("insufficient_buying_power"):
                     bad = summary.get("insufficient_symbols", [])
                     text += "WARNING: insufficient buying power for: " + ", ".join(bad) + "\n"
+                if summary.get("asset_not_found"):
+                    bad = summary.get("asset_not_found_symbols", [])
+                    text += "WARNING: asset not found for: " + ", ".join(bad) + "\n"
 
                 try:
                     resp = requests.post(
