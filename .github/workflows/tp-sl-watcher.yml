@@ -32,5 +32,5 @@ jobs:
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add active_positions.json || true
           git diff --quiet && git diff --staged --quiet || git commit -m "Update state from tp_sl_watcher"
-          git push origin main || true
+          git push origin master || true
         shell: bash
