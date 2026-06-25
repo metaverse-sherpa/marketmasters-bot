@@ -54,12 +54,15 @@ def get_latest_1h_candles(symbols: list) -> dict:
     candles = {}
     for sym, bars in data.items():
         if bars:
-            # Get the most recent bar
-            latest = bars[-1]
+            # Aggregate over all returned bars (up to 2) to ensure we don't miss
+            # a spike that happened right before the hour rolled over.
+            high = max(float(b["h"]) for b in bars)
+            low = min(float(b["l"]) for b in bars)
+            close = float(bars[-1]["c"])
             candles[sym] = {
-                "high": float(latest["h"]),
-                "low": float(latest["l"]),
-                "close": float(latest["c"])
+                "high": high,
+                "low": low,
+                "close": close
             }
     return candles
 
