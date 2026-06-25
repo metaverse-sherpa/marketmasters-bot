@@ -11,9 +11,11 @@ Trading Bot: MarketMasters.ai Chart Patterns -> Alpaca Paper Trading
 import os
 import sys
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import hashlib
+import html
+from urllib.parse import quote_plus
 
 # Optional: load a local .env file during development so running the script
 # inside a virtualenv picks up secrets from .env without exporting them
@@ -44,8 +46,8 @@ except Exception:
 # ── Config ────────────────────────────────────────────────────────────────────
 
 MARKETMASTERS_API_KEY = os.environ.get("MARKETMASTERS_API_KEY")
-MARKETMASTERS_URL = os.environ.get("MARKETMASTERS_URL", "https://api.marketmasters.ai/v1/stocks/patterns")
-
+MARKETMASTERS_URL = os.environ.get("MARKETMASTERS_URL", "https://api.marketmasters.ai/v1/stocks/trade-setups/active")
+MAX_PATTERN_AGE_HOURS = int(os.environ.get("MAX_PATTERN_AGE_HOURS", "0"))
 # Default params used to fetch patterns from MarketMasters. This can be
 # overridden by setting `MARKETMASTERS_PARAMS` in the environment. The
 # variable may be a JSON object (recommended) or a comma-separated list
@@ -161,8 +163,30 @@ def get_active_patterns() -> list:
             return False
         return str(val).lower() == "true"
 
+    import time
+    now_ms = time.time() * 1000
+
+    patterns = []
+    # If using the new trade-setups endpoint
+    if "setups" in data:
+        for s in data["setups"]:
+            patterns.append({
+                "id": s.get("id"),
+                "symbol": s.get("symbol"),
+                "status": s.get("status"),
+                "bullish": s.get("direction") == "long",
+                "breakoutPrice": s.get("entryPrice", 0),
+                "stopLoss": s.get("stopPrice", 0),
+                "target": s.get("targetPrice", 0),
+                "price": s.get("currentPrice", 0),
+                "discoveryDate": s.get("generatedAtTimestamp", 0),
+                "type": s.get("_meta", {}).get("strategy", "unknown") if isinstance(s.get("_meta"), dict) else "unknown"
+            })
+    else:
+        patterns = data.get("patterns", [])
+
     return [
-        p for p in data.get("patterns", [])
+        p for p in patterns
         if p.get("status") == "active"
         and is_bullish_flag(p.get("bullish") or p.get("isBullish"))
         and p.get("breakoutPrice", 0) > 0
@@ -170,6 +194,7 @@ def get_active_patterns() -> list:
         and p.get("target", 0) > 0
         and p.get("stopLoss") < p.get("breakoutPrice")
         and p.get("target") > p.get("breakoutPrice")
+        and (MAX_PATTERN_AGE_HOURS <= 0 or (now_ms - p.get("discoveryDate", 0)) <= MAX_PATTERN_AGE_HOURS * 3600 * 1000)
     ]
 
 # ── Alpaca helpers ────────────────────────────────────────────────────────────
@@ -187,45 +212,36 @@ def load_traded_patterns(path="traded_patterns.json") -> set:
         return set()
 
 
-def load_placed_brackets(path="placed_brackets.json") -> dict:
+def load_active_positions(path="active_positions.json") -> dict:
     """
-    Load persisted bracket metadata previously saved by this bot.
+    Load persisted position metadata.
 
     The file format is a JSON object keyed by a primary order id (or a
     synthetic key when the broker doesn't return one). Each value should
     contain at least: symbol, entry, stop, target, qty, placed_at, and
-    optional leg_ids. This mapping lets downstream consumers (pollers or
-    websocket handlers) unambiguously match a fill to the original bracket
-    parameters for TP/SL inference.
-
-    We deliberately keep this a best-effort loader: corruption or missing
-    files return an empty dict so the bot continues running rather than
-    failing. The write path is also best-effort.
+    primary_order_id.
     """
     try:
         with open(path, "r") as f:
             return json.load(f)
     except Exception:
-        # If the file doesn't exist or is malformed, return an empty mapping.
         return {}
 
 
-def save_placed_brackets(brackets: dict, path="placed_brackets.json") -> None:
+def save_active_positions(positions: dict, path="active_positions.json") -> None:
     """
-    Persist the `brackets` mapping to disk.
-
-    This is intentionally best-effort: failures to persist should not
-    interrupt trading. The file is written atomically by overwriting the
-    target path; for higher durability consider writing to a temp file
-    and renaming, or uploading to an external store.
+    Persist the `positions` mapping to disk.
+    This file acts as the source of truth for the separate TP/SL watcher script.
     """
     try:
         with open(path, "w") as f:
-            json.dump(brackets, f, indent=2, sort_keys=True)
-    except Exception:
-        # Persistence failures are non-fatal; log to stdout and continue.
-        print(f"Warning: failed to save placed brackets to {path}")
-        return
+            # indent=2 and sort_keys=True ensure the file is human-readable and
+            # diffs cleanly if checked into source control.
+            json.dump(positions, f, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"Warning: failed to save active positions to {path}")
+        print(e)
+
 
 def save_traded_patterns(traded: set, path="traded_patterns.json") -> None:
     # Persist pattern ids deterministically (sorted list) so diffs are stable
@@ -262,55 +278,20 @@ def get_existing_symbols() -> set:
     return positions | orders
 
 
-def place_bracket_order(
+def place_entry_order(
     symbol: str,
-    qty: int,
-    entry_price: float,
-    stop_loss: float,
-    take_profit: float,
-    price_below_breakout: bool,
+    qty: float,
 ) -> tuple[dict | None, str | None]:
     """
-    Place a bracket order on Alpaca.
-
-    - price_below_breakout=True  → stop-limit buy (triggers when price hits breakout level)
-    - price_below_breakout=False → limit buy at current market price (already broke out)
-
-    Bracket legs:
-      take_profit: limit order at target
-      stop_loss:   stop order at stopLoss
+    Place a fractional Market order for entry.
     """
-    # Build Alpaca bracket order payload. We use string prices because Alpaca
-    # API expects string-serialized decimals for price fields in JSON.
-    # Notes:
-    # - `order_class: bracket` creates the primary entry and attached legs.
-    # - `take_profit.limit_price` and `stop_loss.stop_price` are rounded to
-    #   2 decimal places for currency formatting.
     order: dict = {
         "symbol": symbol,
-        "qty": str(qty),
+        "qty": str(round(qty, 4)),
         "side": "buy",
-        "time_in_force": "gtc",
-        "order_class": "bracket",
-        "take_profit": {"limit_price": str(round(take_profit, 2))},
-        "stop_loss": {"stop_price": str(round(stop_loss, 2))},
+        "time_in_force": "day",
+        "type": "market",
     }
-
-    if price_below_breakout:
-        # If current market price is below the breakout level, we want to
-        # enter only if price reaches the breakout: use a stop-limit buy
-        # (trigger at stop_price, create a limit at a small buffer above to
-        # increase fill probability). The buffer is configurable.
-        order["type"] = "stop_limit"
-        order["stop_price"] = str(round(entry_price, 2))
-        order["limit_price"] = str(round(entry_price * (1 + BREAKOUT_LIMIT_BUFFER), 2))
-    else:
-        # If price has already reached/broken out, place a limit at the
-        # breakout price to avoid market slippage. Using a limit guarantees
-        # the entry price or better; if you prefer a more aggressive fill
-        # strategy, add a small buffer (e.g. *1.001).
-        order["type"] = "limit"
-        order["limit_price"] = str(round(entry_price, 2))
 
     headers = {**ALPACA_HEADERS, "Content-Type": "application/json"}
     resp = requests.post(f"{ALPACA_BASE_URL}/orders", headers=headers, json=order, timeout=30)
@@ -318,27 +299,19 @@ def place_bracket_order(
     if resp.status_code in (200, 201):
         return resp.json(), None
 
-    # Attempt to detect Alpaca's insufficient buying power response and
-    # treat it specially so callers can choose to ignore it. Alpaca returns
-    # a 403 with a JSON body containing a `message` like
-    # {"message":"insufficient buying power","code":40310000,...}
     try:
-        body = resp.json()
+        msg = resp.json().get("message", resp.text)
+        code = resp.json().get("code", 0)
     except Exception:
-        body = {}
+        msg = resp.text
+        code = 0
 
-    msg = ""
-    code = None
-    if isinstance(body, dict):
-        msg = str(body.get("message") or "")
-        code = body.get("code")
-
-    if resp.status_code == 403 and ("insufficient buying power" in msg.lower() or code == 40310000):
+    if resp.status_code == 403 and "insufficient buying power" in msg.lower():
         return None, "insufficient buying power"
 
-    # Detect Alpaca's "asset not found" response (HTTP 422, code 42210000).
-    # This happens when a symbol is not tradable on Alpaca (e.g., foreign
-    # stocks with suffixes like .DE). Treat as a warning, not a fatal error.
+    if resp.status_code == 403 and "account is not allowed to trade" in msg.lower():
+        return None, "account not allowed to trade"
+
     if resp.status_code == 422 and ("not found" in msg.lower() or code == 42210000):
         return None, "asset not found"
 
@@ -407,8 +380,8 @@ def run_bot():
     # Account equity → trade size
     account = get_account()
     equity = float(account["equity"])
-    trade_amount = equity * PORTFOLIO_PCT
-    print(f"  Equity: ${equity:>12,.2f}  |  Trade size (2%): ${trade_amount:,.2f}")
+    buying_power = float(account["buying_power"])
+    print(f"  Equity: ${equity:>12,.2f}  |  Initial buying power: ${buying_power:,.2f}")
 
     # Query Alpaca for current exposure and pending orders. We do this early
     # so we can skip any symbol that already has an open position/order.
@@ -458,21 +431,33 @@ def run_bot():
             skipped_symbol += 1
             continue
 
-        # Number of shares at 2% of equity
-        qty = max(1, int(trade_amount / breakout))
+        # Calculate dynamic trade amount based on *remaining* buying power
+        # so we never run out of margin.
+        trade_amount = buying_power * PORTFOLIO_PCT
+        
+        # Ensure the current market price is within 1% of the original entry target
+        # before we place our fractional market order.
+        if current_price < (breakout * 0.99) or current_price > (breakout * 1.01):
+            print(f"  SKIP  {symbol:<8}  Price drifted >1% from target entry: {current_price} vs {breakout}")
+            continue
 
-        price_below_breakout = current_price < breakout
-        # Always attempt entry at the breakout price (place a limit there)
-        entry_price = breakout
+        # Calculate dynamic trade amount based on *remaining* buying power
+        # so we never run out of margin.
+        trade_amount = buying_power * PORTFOLIO_PCT
+        
+        # Fractional shares
+        qty = round(trade_amount / current_price, 4)
 
-        direction = "PENDING" if price_below_breakout else "BROKE OUT"
+        entry_price = current_price
+
+        direction = "MARKET"
         print(
             f"  {direction:<9} {symbol:<8}  {pattern_type:<22}"
             f"  entry={entry_price:>8.2f}  sl={stop_loss:>8.2f}  tp={target:>8.2f}  qty={qty}"
         )
 
-        order, err = place_bracket_order(
-            symbol, qty, entry_price, stop_loss, target, price_below_breakout
+        order, err = place_entry_order(
+            symbol, qty
         )
 
         if order:
@@ -480,6 +465,9 @@ def run_bot():
             traded.add(pid)
             existing_symbols.add(symbol)
             new_trades += 1
+            # Subtract the estimated cost of this order from our local buying power
+            # to ensure future trades dynamically scale down and don't hit margin limits
+            buying_power -= (qty * entry_price)
             # Record structured info for notifications
             try:
                 new_orders_details.append({
@@ -493,63 +481,42 @@ def run_bot():
             except Exception:
                 # best-effort: don't let notification failures break the run
                 pass
-            # Persist bracket metadata for later close-detection (TP/SL inference).
-            #
-            # Rationale: when an order is later observed as closed/filled we
-            # want an authoritative source of the originally-intended entry,
-            # stop and target levels. Relying on heuristics alone risks
-            # misclassification (especially for instruments with wide ticks
-            # or for partial fills). We persist a minimal mapping keyed by
-            # the broker's primary order id (or a synthetic key when one
-            # isn't provided).
+            # Record TP/SL metadata for the new 5-minute watcher script.
             try:
-                brackets = load_placed_brackets()
+                positions = load_active_positions()
 
-                # Prefer broker-assigned id; fall back to client id or a
-                # synthetic timestamped key so every placement is recorded.
-                primary_id = order.get("id") or order.get("client_order_id")
+                primary_id = order.get("id")
                 if not primary_id:
                     primary_id = f"{symbol}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
 
-                # Normalize numeric/None values into the mapping; keep raw
-                # strings for traceability to the original request/response.
-                entry = entry_price
-                stop = stop_loss
-                tgt = target
-
-                # Attempt to capture any child/leg identifiers returned by
-                # the broker. These can help link fills back to the
-                # specific leg that executed.
-                leg_ids = None
-                for key in ("legs", "child_order_ids", "child_orders", "legs_orders"):
-                    if key in order and order.get(key):
-                        leg_ids = order.get(key)
-                        break
-
-                brackets[str(primary_id)] = {
+                positions[str(primary_id)] = {
                     "symbol": symbol,
-                    "entry": entry,
-                    "stop": stop,
-                    "target": tgt,
-                    "qty": int(qty),
+                    "entry": entry_price,
+                    "stop": stop_loss,
+                    "target": target,
+                    "qty": qty,
                     "placed_at": datetime.now(timezone.utc).isoformat(),
                     "primary_order_id": primary_id,
-                    "leg_ids": leg_ids,
                 }
 
                 # Best-effort persist; failures are logged but non-fatal.
-                save_placed_brackets(brackets)
+                save_active_positions(positions)
             except Exception as e:
-                print("Warning: failed to persist placed bracket metadata:", e)
+                print("Warning: failed to persist position metadata:", e)
         else:
             # If Alpaca indicates insufficient buying power, treat it as a
-            # non-fatal condition: log a warning and continue without
-            # incrementing the error counter so the workflow doesn't fail
-            # solely because the account lacks buying power for some trades.
+            # non-fatal condition: log a warning and break early without
+            # incrementing the error counter so the workflow doesn't fail.
+            # There is no point in trying remaining patterns if out of buying power.
             if err and "insufficient buying power" in str(err).lower():
-                print(f"           {'':8}  WARNING: {err} — skipping trade (insufficient buying power)")
+                print(f"           {'':8}  WARNING: {err} — stopping further trades (insufficient buying power)")
                 insufficient_symbols.append(symbol)
-                continue
+                break
+                
+            # If the Alpaca account is restricted/not allowed to trade, break early.
+            if err and "account is not allowed to trade" in str(err).lower():
+                print(f"           {'':8}  ERROR: {err} — stopping further trades (account restricted)")
+                break
 
             # If Alpaca indicates the asset is not found (e.g., foreign
             # stocks not tradable on Alpaca), treat as a warning and skip
@@ -588,30 +555,58 @@ def run_bot():
             token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
             chat = os.environ.get("TELEGRAM_CHAT_ID", "")
             if token and chat:
+                if not summary.get("new_orders") and not summary.get("insufficient_buying_power") and not summary.get("asset_not_found"):
+                    return new_trades, errors
+                    
                 run_id = os.environ.get("GITHUB_RUN_NUMBER", "local")
                 text = f"MarketMasters Bot Run #{run_id}\n"
                 if summary.get("new_orders"):
                     text += f"New orders: {len(summary.get('new_orders'))}\n"
                     for o in summary.get("new_orders", []):
-                        text += (
-                            f"{o.get('symbol')} — entry={o.get('entry_price')} "
-                            f"sl={o.get('stop_loss')} tp={o.get('take_profit')} "
-                            f"qty={o.get('qty')} order_id={o.get('order_id')}\n"
-                        )
+                        sym = str(o.get("symbol"))
+                        url = f"https://marketmasters.ai/stocks/{quote_plus(sym)}"
+                        link = f"<a href=\"{url}\">{html.escape(sym)}</a>"
+                        
+                        try:
+                            entry = f"{float(o.get('entry_price')):.2f}"
+                            sl = f"{float(o.get('stop_loss')):.2f}"
+                            tp = f"{float(o.get('take_profit')):.2f}"
+                        except Exception:
+                            entry = str(o.get("entry_price"))
+                            sl = str(o.get("stop_loss"))
+                            tp = str(o.get("take_profit"))
+                            
+                        text += f"• {link} — entry: {entry} | SL: {sl} | TP: {tp}\n"
+                        
                 if summary.get("insufficient_buying_power"):
                     bad = summary.get("insufficient_symbols", [])
-                    text += "WARNING: insufficient buying power for: " + ", ".join(bad) + "\n"
+                    if bad:
+                        links = []
+                        for sym in bad:
+                            url = f"https://marketmasters.ai/stocks/{quote_plus(str(sym))}"
+                            links.append(f'<a href="{url}">{html.escape(str(sym))}</a>')
+                        text += "WARNING: insufficient buying power for: " + ", ".join(links) + "\n"
+                        
                 if summary.get("asset_not_found"):
                     bad = summary.get("asset_not_found_symbols", [])
-                    text += "WARNING: asset not found for: " + ", ".join(bad) + "\n"
+                    if bad:
+                        links = []
+                        for sym in bad:
+                            url = f"https://marketmasters.ai/stocks/{quote_plus(str(sym))}"
+                            links.append(f'<a href="{url}">{html.escape(str(sym))}</a>')
+                        text += "WARNING: asset not found for: " + ", ".join(links) + "\n"
 
                 try:
-                    resp = requests.post(
-                        f"https://api.telegram.org/bot{token}/sendMessage",
-                        data={"chat_id": chat, "text": text},
-                        timeout=10,
-                    )
-                    print(f"Telegram response: {resp.status_code} {resp.text}")
+                    # Telegram message length limit is 4096. Chunk the text if necessary.
+                    chunk_size = 4000
+                    for i in range(0, len(text), chunk_size):
+                        chunk = text[i:i + chunk_size]
+                        resp = requests.post(
+                            f"https://api.telegram.org/bot{token}/sendMessage",
+                            data={"chat_id": chat, "text": chunk, "parse_mode": "HTML"},
+                            timeout=10,
+                        )
+                        print(f"Telegram response: {resp.status_code} {resp.text}")
                 except Exception as e:
                     print(f"[WARN] Telegram send failed: {e}")
         except Exception:
